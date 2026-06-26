@@ -24,3 +24,11 @@
 - Dodano migającą kontrolkę LIVE.
 - Dodano prosty pasek poziomu wejścia audio na podstawie RMS.
 - Panel operatora pokazuje aktywny model i tryb CPU/GPU.
+
+## v0.2.0 - Word Stabilizer
+
+- Dodano stabilizator oparty o porównywanie słów, a nie sklejanie stringów.
+- Mocniejsze odcinanie historii z rolling-contextu Whispera.
+- Lepsze scalanie powtórzonych bloków historii.
+- Po pauzie zatwierdzana jest pełna ostatnia hipoteza, żeby nie gubić końcówek zdań.
+- Dłuższy blok aktualnej wypowiedzi przed automatycznym przejściem do historii.
