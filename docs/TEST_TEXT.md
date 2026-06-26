@@ -1,8 +1,5 @@
-# Tekst testowy CaptionBox AV
+# CaptionBox AV — tekst testowy
 
-Czytaj w normalnym tempie. Po pustych liniach zrób około sekundę pauzy.
-
-```text
 Dzień dobry Państwu, witam wszystkich na dzisiejszej konferencji.
 
 Naszym celem jest sprawdzenie, czy napisy pojawiają się płynnie, czy są czytelne i czy nie zostają pojedyncze słowa po zakończeniu wypowiedzi.
@@ -16,4 +13,3 @@ Sprawdzamy również trudniejsze słowa: Konstantynopolitańczykowianeczka, wyre
 Na widowni mogą znajdować się osoby niedosłyszące, dlatego zależy nam na tym, żeby napisy były stabilne, wyraźne i nie migały.
 
 Ostatnie zdanie testowe: jeśli po tej wypowiedzi zostaną na ekranie trzy albo cztery przypadkowe słowa, oznacza to, że trzeba poprawić końcówkę bufora.
-```

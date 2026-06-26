@@ -1,22 +1,18 @@
-# CHANGELOG
-
-## Sprint 2 - Caption Stabilizer 2.1
-
-- Dopisywanie ostatniego roboczego tekstu przy pauzie, żeby nie zjadać końcówek zdań.
-- Mniej konserwatywny ogon stabilizacji: 2 słowa zamiast 4.
-- Lepsze przycinanie overlapu między aktualnym blokiem i nową hipotezą.
-- Dłuższy aktualny blok publiczności przed automatycznym przeniesieniem do historii.
-- Mocniejsze zabezpieczenie przed duplikatami całych bloków.
-
 # Changelog
 
-## CaptionBox AV 2.0
+## v0.1.1 - Stabilizer polish
 
-- Usunięto eksperymentalny backend Parakeet z tej paczki.
-- Dodano stabilizator wspólnego prefiksu hipotez ASR.
-- Publiczność widzi tylko zatwierdzony tekst.
-- Operator widzi roboczą hipotezę.
-- Ograniczono powtórki i echa poprzednich wypowiedzi.
-- Wydłużono aktualny blok wypowiedzi.
-- Poprawiono renderer konferencyjny: historia płynie do góry, aktualna wypowiedź zostaje na dole.
-- Zachowano wybór wejścia audio, CPU/GPU, modelu i rozmiaru czcionki.
+- Przebudowano logikę stabilizacji napisów na podejście candidate-based.
+- Publiczny tekst nie jest już budowany przez proste dopisywanie kolejnych fragmentów Whispera.
+- Po pauzie zatwierdzana jest ostatnia pełna hipoteza, żeby ograniczyć zjadanie końcówek zdań.
+- Poprawiono odcinanie echa historii z rolling-contextu.
+- Zmniejszono ryzyko powtórzeń typu „Naszym celem... Naszym celem...”.
+- Wydłużono dopuszczalny aktualny blok, żeby wypowiedzi nie były dzielone zbyt szybko.
+
+## v0.1.0 - Clean stable base
+
+- Operator window + audience window.
+- Faster-Whisper with CPU/GPU selection.
+- Audio input selector.
+- Conference-style audience display.
+- Operator draft preview.

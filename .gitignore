@@ -1,35 +1,33 @@
-# Python
+# Python cache
 __pycache__/
 *.py[cod]
 *$py.class
-.pytest_cache/
-.mypy_cache/
-.ruff_cache/
 
 # Virtual environments
 venv/
 .venv/
 env/
-ENV/
 
-# Local caches and downloaded models
-.cache/
-models/
+# Logs and temp files
 *.log
 *.tmp
 *.bak
 
-# Local config / secrets
+# Local settings
 .env
-.env.*
+config/local_settings.json
 
-# Archives and generated packages
-*.zip
-*.7z
-*.rar
+# Model caches / downloaded models
+models/
+.cache/
 
-# OS / editor
+# OS / editor files
 .DS_Store
 Thumbs.db
 .vscode/
 .idea/
+
+# Sprint payload folders
+payload/
+sprint*_files/
+apply_sprint*.bat

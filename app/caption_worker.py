@@ -64,7 +64,7 @@ class CaptionWorker(QThread):
         if self.compute_device == "cuda" and self.whisper_engine.device == "cpu":
             self.status.emit("GPU/CUDA niedostępne - przełączono automatycznie na CPU.")
 
-        # Stabilizer 2.1: public gets stable text, but endings are committed on pause.
+        # Stabilizer 3.0: candidate-based rolling context; fewer repeats, stronger pause commit.
         self.caption_engine = CaptionEngine(
             audio_buffer=self.audio_buffer,
             whisper_engine=self.whisper_engine,
@@ -72,13 +72,13 @@ class CaptionWorker(QThread):
             context_seconds=9.0,
             recent_rms_seconds=0.55,
             silence_threshold=0.0035,
-            process_interval_seconds=0.65,
-            pause_commit_seconds=0.95,
-            max_history_blocks=14,
-            max_current_words=46,
-            max_current_chars=340,
+            process_interval_seconds=0.60,
+            pause_commit_seconds=0.90,
+            max_history_blocks=18,
+            max_current_words=56,
+            max_current_chars=430,
             stable_repetitions_required=2,
-            unstable_tail_words=2,
+            unstable_tail_words=1,
         )
 
     def run(self):

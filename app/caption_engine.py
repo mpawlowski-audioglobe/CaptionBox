@@ -16,17 +16,19 @@ class CaptionState:
 
 class CaptionEngine:
     """
-    CaptionBox AV Stabilizer 2.1
+    CaptionBox AV Stabilizer 3.0
 
-    Cel:
-    - operator widzi szybkie rozpoznanie robocze,
-    - publiczność widzi stabilniejszy tekst,
-    - końcówki zdań nie są zjadane,
-    - stare fragmenty z bufora nie wracają jako duplikaty.
+    Założenia:
+    - okno operatora widzi najnowszą hipotezę roboczą,
+    - okno publiczności widzi tekst stabilizowany,
+    - historia jest niezmienna: raz zapisany blok nie jest później poprawiany,
+    - aktualna wypowiedź może być poprawiana, ale nie powinna powielać historii,
+    - po pauzie zatwierdzamy ostatnią pełną hipotezę, żeby nie zjadać końcówek zdań.
 
-    Najważniejsza zmiana względem poprzedniej wersji:
-    przy pauzie zatwierdzamy ostatnią roboczą hipotezę, zanim zamkniemy wypowiedź.
-    Dzięki temu słowa, które były widoczne u operatora przez 1-2 sekundy, nie giną.
+    Największa różnica względem poprzedniej wersji:
+    nie dopisujemy kolejnych fragmentów Whispera do publicznego tekstu metodą append.
+    Zamiast tego wyciągamy z rolling-context tylko bieżącą wypowiedź i publikujemy jej
+    stabilny prefiks. To mocno ogranicza powtórzenia typu „Naszym celem... Naszym celem...”.
     """
 
     def __init__(
@@ -37,14 +39,14 @@ class CaptionEngine:
         context_seconds=9.0,
         recent_rms_seconds=0.55,
         silence_threshold=0.0035,
-        process_interval_seconds=0.65,
-        pause_commit_seconds=0.95,
-        max_history_blocks=14,
-        max_current_words=46,
-        max_current_chars=340,
+        process_interval_seconds=0.60,
+        pause_commit_seconds=0.90,
+        max_history_blocks=18,
+        max_current_words=56,
+        max_current_chars=430,
         min_commit_words=2,
         stable_repetitions_required=2,
-        unstable_tail_words=2,
+        unstable_tail_words=1,
     ):
         self.audio_buffer = audio_buffer
         self.whisper_engine = whisper_engine
@@ -69,15 +71,18 @@ class CaptionEngine:
         self.last_voice_time = time.time()
         self.last_state_signature = None
 
+        # Candidate == aktualna wypowiedź wycięta z pełnego rolling-contextu.
         # Each item: (original_words, normalized_words)
-        self.hypotheses: List[Tuple[List[str], List[str]]] = []
-        self.last_raw_words: List[str] = []
-        self.last_raw_norm_words: List[str] = []
-        self.last_raw_time = 0.0
+        self.candidates: List[Tuple[List[str], List[str]]] = []
+        self.last_candidate_words: List[str] = []
+        self.last_candidate_norm_words: List[str] = []
+        self.last_candidate_time = 0.0
+        self.last_raw_text = ""
 
-        # Words already shown to the audience in the current session.
-        self.committed_norm_words: List[str] = []
-        self.recent_committed_blocks_norm: List[str] = []
+        # Finalized words from history only. Current public block is intentionally not here,
+        # because it may still be updated before finalization.
+        self.history_norm_words: List[str] = []
+        self.recent_history_norm_blocks: List[str] = []
 
     def process_once(self):
         now = time.time()
@@ -105,13 +110,12 @@ class CaptionEngine:
 
         pause_elapsed = now - self.last_voice_time
 
-        # Koniec wypowiedzi: zanim zamkniemy blok, dopisz ostatni roboczy tekst.
-        # To naprawia zjadanie końcówek zdań widocznych u operatora.
-        if recent_silent and self.current and pause_elapsed >= self.pause_commit_seconds:
-            added = self._commit_tail_from_last_raw(force=True)
-            self._finalize_current()
-            self._clear_hypotheses()
-            self.note = "pauza / zapisano wypowiedź" + (" + końcówka" if added else "")
+        # Koniec wypowiedzi. To jest najważniejszy moment:
+        # zatwierdzamy ostatnią kompletną hipotezę, nawet jeśli stabilny prefiks był krótszy.
+        if recent_silent and pause_elapsed >= self.pause_commit_seconds:
+            finalized = self._finalize_from_last_candidate()
+            self._clear_candidates()
+            self.note = "pauza / zapisano wypowiedź" if finalized else "pauza"
             return self._state(rms, "")
 
         if recent_silent and context_silent:
@@ -120,45 +124,48 @@ class CaptionEngine:
 
         raw = self.whisper_engine.transcribe_audio(context, self.sample_rate)
         raw = self._clean(raw)
+        self.last_raw_text = raw
 
         if not raw or self._is_bad_text(raw):
             self.note = "brak tekstu"
             return self._state(rms, "")
 
-        raw_words = raw.split()
-        raw_norm_words = [self._norm_word(w) for w in raw_words]
-        raw_words, raw_norm_words = self._drop_empty_word_pairs(raw_words, raw_norm_words)
-
+        raw_words, raw_norm_words = self._words_and_norm(raw)
         if not raw_words:
             self.note = "brak tekstu"
             return self._state(rms, "")
 
-        self.last_raw_words = raw_words
-        self.last_raw_norm_words = raw_norm_words
-        self.last_raw_time = now
+        candidate_words, candidate_norm_words = self._extract_current_candidate(raw_words, raw_norm_words)
+        candidate_text = self._sanitize_candidate(" ".join(candidate_words))
+        candidate_words, candidate_norm_words = self._words_and_norm(candidate_text)
 
-        self.hypotheses.append((raw_words, raw_norm_words))
-        self.hypotheses = self.hypotheses[-self.stable_repetitions_required:]
+        if not candidate_words:
+            self.note = "echo historii"
+            return self._state(rms, "")
 
-        stable_words, stable_norm_words = self._stable_prefix_from_hypotheses()
-        draft = self._build_operator_draft(raw_words, raw_norm_words, stable_norm_words)
+        self.last_candidate_words = candidate_words
+        self.last_candidate_norm_words = candidate_norm_words
+        self.last_candidate_time = now
+
+        self.candidates.append((candidate_words, candidate_norm_words))
+        self.candidates = self.candidates[-self.stable_repetitions_required:]
+
+        stable_words, stable_norm_words = self._stable_prefix_from_candidates()
+        draft = self._build_operator_draft(candidate_words, stable_norm_words)
 
         if stable_words:
-            new_words, new_norm_words = self._remove_already_committed(stable_words, stable_norm_words)
-            new_text = self._sanitize_candidate(" ".join(new_words))
-            if new_text and not self._looks_like_tail_noise(new_text):
-                self._append_to_current(new_text)
-                self.note = "zatwierdzono fragment"
+            stable_text = self._sanitize_candidate(" ".join(stable_words))
+            if stable_text and not self._looks_like_noise(stable_text):
+                self._set_current_public_text(stable_text)
+                self.note = "zatwierdzono stabilny fragment"
             else:
-                self.note = "robocze / echo"
+                self.note = "robocze / filtr"
         else:
             self.note = "robocze"
 
-        # Jeśli blok robi się za długi, dopisz także aktualny ogon i zamknij blok.
         if self._current_should_finalize():
-            self._commit_tail_from_last_raw(force=True)
-            self._finalize_current()
-            self._clear_hypotheses()
+            self._finalize_from_last_candidate(prefer_current=True)
+            self._clear_candidates()
             self.note = "limit bloku / zapisano wypowiedź"
 
         return self._state(rms, draft)
@@ -183,14 +190,54 @@ class CaptionEngine:
         self.last_state_signature = signature
         return state
 
-    def _stable_prefix_from_hypotheses(self):
-        if len(self.hypotheses) < self.stable_repetitions_required:
+    def _extract_current_candidate(self, raw_words, raw_norm_words):
+        if not self.history_norm_words:
+            return raw_words, raw_norm_words
+
+        history_tail = self.history_norm_words[-260:]
+
+        # 1. Najczęstszy przypadek: koniec historii == początek rolling-contextu.
+        best_prefix_overlap = 0
+        max_overlap = min(len(history_tail), len(raw_norm_words), 220)
+        for overlap in range(2, max_overlap + 1):
+            if history_tail[-overlap:] == raw_norm_words[:overlap]:
+                best_prefix_overlap = overlap
+        if best_prefix_overlap > 0:
+            return raw_words[best_prefix_overlap:], raw_norm_words[best_prefix_overlap:]
+
+        # 2. Rolling-context czasem zaczyna się w środku historii. Szukamy mocnej kotwicy
+        # z końca historii w dowolnym miejscu raw i bierzemy tekst po niej.
+        best_end = -1
+        best_len = 0
+        max_anchor = min(28, len(history_tail), len(raw_norm_words))
+        for anchor_len in range(max_anchor, 3, -1):
+            anchor = history_tail[-anchor_len:]
+            idx = self._find_sequence(raw_norm_words, anchor)
+            if idx >= 0:
+                best_end = idx + anchor_len
+                best_len = anchor_len
+                break
+        if best_end >= 0 and best_len >= 4:
+            return raw_words[best_end:], raw_norm_words[best_end:]
+
+        # 3. Jeżeli pierwsze kilka słów raw jest bardzo podobne do ostatniego bloku historii,
+        # odcinamy powtórzony początek ostrożnie.
+        for probe in range(min(12, len(raw_norm_words)), 3, -1):
+            raw_prefix = " ".join(raw_norm_words[:probe])
+            for old in self.recent_history_norm_blocks[-6:]:
+                if raw_prefix and raw_prefix in old:
+                    return raw_words[probe:], raw_norm_words[probe:]
+
+        return raw_words, raw_norm_words
+
+    def _stable_prefix_from_candidates(self):
+        if len(self.candidates) < self.stable_repetitions_required:
             return [], []
 
-        latest_words, latest_norm = self.hypotheses[-1]
+        latest_words, latest_norm = self.candidates[-1]
         prefix_len = len(latest_norm)
 
-        for _, other_norm in self.hypotheses[:-1]:
+        for _, other_norm in self.candidates[:-1]:
             common = 0
             for a, b in zip(latest_norm, other_norm):
                 if a == b:
@@ -199,8 +246,8 @@ class CaptionEngine:
                     break
             prefix_len = min(prefix_len, common)
 
-        # Nie publikuj od razu 1-2 ostatnich słów, bo Whisper często jeszcze je poprawia.
-        # Ale nie trzymaj za dużo, bo wtedy zjadamy końcówki.
+        # Trzymamy tylko ostatnie słowo jako robocze. Poprzednie wersje trzymały 2 słowa,
+        # co powodowało zjadanie końcówek zdań.
         if self.unstable_tail_words > 0 and prefix_len > self.unstable_tail_words:
             prefix_len -= self.unstable_tail_words
         elif prefix_len < len(latest_norm):
@@ -208,149 +255,111 @@ class CaptionEngine:
 
         return latest_words[:prefix_len], latest_norm[:prefix_len]
 
-    def _commit_tail_from_last_raw(self, force=False):
-        if not self.last_raw_words or not self.last_raw_norm_words:
-            return False
-
-        # Jeżeli ostatni wynik jest bardzo stary, nie używaj go jako końcówki.
-        if not force and time.time() - self.last_raw_time > 2.5:
-            return False
-
-        words, norm_words = self._remove_already_committed(
-            self.last_raw_words,
-            self.last_raw_norm_words,
-        )
-        text = self._sanitize_candidate(" ".join(words))
-        if not text:
-            return False
-
-        # Przy pauzie dopuszczamy krótsze końcówki, ale nadal blokujemy ewidentne echo.
-        if self._looks_like_tail_noise(text) and len(text.split()) <= 2:
-            return False
-
-        before = self._norm(self.current)
-        self._append_to_current(text)
-        after = self._norm(self.current)
-        return after != before
-
-    def _build_operator_draft(self, raw_words, raw_norm_words, stable_norm_words):
-        if not raw_words:
-            return ""
-        start = len(stable_norm_words)
-        if start >= len(raw_words):
-            draft_words = raw_words[-min(len(raw_words), 18):]
-        else:
-            draft_words = raw_words[start:]
-        return self._clean(" ".join(draft_words[-30:]))
-
-    def _remove_already_committed(self, words, norm_words):
-        if not words or not norm_words:
-            return [], []
-
-        committed = self.committed_norm_words
-        if not committed:
-            return words, norm_words
-
-        # Najpierw klasyczny overlap: koniec zatwierdzonego == początek nowego.
-        best = 0
-        max_overlap = min(len(committed), len(norm_words), 180)
-        for overlap in range(1, max_overlap + 1):
-            if committed[-overlap:] == norm_words[:overlap]:
-                best = overlap
-        if best > 0:
-            return words[best:], norm_words[best:]
-
-        # Jeżeli początek nowego tekstu jest już gdzieś w ogonie historii, odetnij go.
-        tail = committed[-220:]
-        max_probe = min(14, len(norm_words))
-        for probe in range(max_probe, 2, -1):
-            seq = norm_words[:probe]
-            idx = self._find_sequence(tail, seq)
-            if idx >= 0:
-                return words[probe:], norm_words[probe:]
-
-        candidate_norm = " ".join(norm_words)
-        for old in self.recent_committed_blocks_norm[-10:]:
-            if candidate_norm == old or self._ratio(candidate_norm, old) > 0.90:
-                return [], []
-
-        return words, norm_words
-
-    def _append_to_current(self, text):
-        text = self._clean(text)
+    def _set_current_public_text(self, text):
+        text = self._sanitize_candidate(text)
         if not text:
             return
-
-        text = self._remove_word_repeats(text)
-        text = self._remove_phrase_repeats(text)
 
         if not self.current:
             self.current = text
-            self._remember_committed_words(text)
             return
 
-        current_norm_words = self._norm(self.current).split()
-        text_words = text.split()
-        text_norm_words = [self._norm_word(w) for w in text_words]
-        text_words, text_norm_words = self._drop_empty_word_pairs(text_words, text_norm_words)
-
-        # Jeżeli nowy fragment jest już w aktualnym bloku, nie dodawaj go drugi raz.
-        text_norm = " ".join(text_norm_words)
-        current_norm = " ".join(current_norm_words)
-        if text_norm and (text_norm in current_norm or self._ratio(text_norm, current_norm) > 0.94):
+        current_norm = self._norm(self.current)
+        text_norm = self._norm(text)
+        if not text_norm:
             return
 
-        # Usuń overlap między aktualnym blokiem i dopisywanym fragmentem.
-        best = 0
-        max_overlap = min(len(current_norm_words), len(text_norm_words), 80)
-        for overlap in range(1, max_overlap + 1):
-            if current_norm_words[-overlap:] == text_norm_words[:overlap]:
-                best = overlap
-
-        if best > 0:
-            text_words = text_words[best:]
-            text_norm_words = text_norm_words[best:]
-
-        text = self._clean(" ".join(text_words))
-        if not text:
+        # Jeżeli nowa stabilna hipoteza rozszerza aktualny tekst, podmieniamy na dłuższą.
+        if text_norm.startswith(current_norm):
+            self.current = text
             return
 
-        combined = self._clean((self.current + " " + text).strip())
-        combined = self._remove_word_repeats(combined)
-        combined = self._remove_phrase_repeats(combined)
-        self.current = combined
-        self._remember_committed_words(text)
+        # Jeżeli aktualny tekst jest zawarty w nowym, też podmieniamy.
+        if current_norm in text_norm:
+            self.current = text
+            return
 
-    def _remember_committed_words(self, text):
-        norm_words = self._norm(text).split()
-        if norm_words:
-            self.committed_norm_words.extend(norm_words)
-            self.committed_norm_words = self.committed_norm_words[-800:]
+        # Jeśli nowy tekst jest krótszy, ale bardzo podobny, nie cofaj publiczności.
+        if self._ratio(current_norm, text_norm) > 0.86 and len(text_norm) <= len(current_norm):
+            return
 
-    def _finalize_current(self):
-        # Na wszelki wypadek jeszcze raz dopisz aktualny roboczy ogon.
-        self._commit_tail_from_last_raw(force=True)
+        # Jeżeli Whisper realnie zmienił hipotezę, ale ona jest dłuższa i podobna,
+        # pozwalamy ją podmienić w aktualnym bloku. Historia nie jest ruszana.
+        if self._ratio(current_norm, text_norm) > 0.62 and len(text_norm) > len(current_norm):
+            self.current = text
+            return
 
-        text = self._clean(self.current)
+        # W innym wypadku traktujemy to jako nową myśl. Zamykamy bieżący blok,
+        # ale nie pozwalamy na powielanie historii.
+        if len(self.current.split()) >= self.min_commit_words:
+            self._finalize_text(self.current)
+        self.current = text
+
+    def _finalize_from_last_candidate(self, prefer_current=False):
+        if not self.last_candidate_words:
+            if self.current:
+                return self._finalize_text(self.current)
+            return False
+
+        candidate_text = self._sanitize_candidate(" ".join(self.last_candidate_words))
+        current_text = self._sanitize_candidate(self.current)
+
+        if prefer_current and current_text:
+            text = self._choose_better_final(current_text, candidate_text)
+        else:
+            text = self._choose_better_final(current_text, candidate_text)
+
+        return self._finalize_text(text)
+
+    def _choose_better_final(self, current_text, candidate_text):
+        current_text = self._clean(current_text)
+        candidate_text = self._clean(candidate_text)
+
+        if not candidate_text:
+            return current_text
+        if not current_text:
+            return candidate_text
+
+        c_norm = self._norm(current_text)
+        cand_norm = self._norm(candidate_text)
+
+        # Jeżeli kandydat zawiera aktualny tekst i dopowiada końcówkę, bierzemy kandydata.
+        if c_norm and c_norm in cand_norm:
+            return candidate_text
+
+        # Jeżeli kandydat jest mocno podobny i dłuższy, zwykle zawiera końcówkę.
+        if self._ratio(c_norm, cand_norm) > 0.70 and len(candidate_text) >= len(current_text):
+            return candidate_text
+
+        # Jeżeli kandydat jest ewidentnie echem historii albo bardzo krótki, zostaw current.
+        if self._looks_like_noise(candidate_text) and len(candidate_text.split()) <= 3:
+            return current_text
+
+        # W pozostałych przypadkach preferujemy dłuższy tekst, ale bez przesady.
+        if len(candidate_text.split()) >= len(current_text.split()):
+            return candidate_text
+        return current_text
+
+    def _finalize_text(self, text):
+        text = self._sanitize_candidate(text)
         if not text:
             self.current = ""
-            return
+            return False
 
-        text = self._remove_word_repeats(text)
-        text = self._remove_phrase_repeats(text)
-        text = self._clean(text)
-
-        if len(text.split()) < self.min_commit_words and self.history:
+        words = text.split()
+        if len(words) < self.min_commit_words and self.history:
             self.current = ""
-            return
+            return False
 
-        if not self._is_duplicate_history(text):
-            self.history.append(text)
-            self.history = self.history[-self.max_history_blocks:]
-            self.recent_committed_blocks_norm.append(self._norm(text))
-            self.recent_committed_blocks_norm = self.recent_committed_blocks_norm[-24:]
+        if self._is_duplicate_history(text):
+            self.current = ""
+            return False
 
+        self.history.append(text)
+        self.history = self.history[-self.max_history_blocks:]
+        self._rebuild_history_memory()
         self.current = ""
+        return True
 
     def _current_should_finalize(self):
         if not self.current:
@@ -360,52 +369,60 @@ class CaptionEngine:
             return True
         if len(self.current) >= self.max_current_chars:
             return True
-        if re.search(r"[.!?…]$", self.current.strip()) and len(words) >= 10:
+        # Kropka nie kończy od razu wypowiedzi, bo Whisper potrafi ją wstawić za wcześnie.
+        # Finalizujemy po interpunkcji dopiero przy sensownej długości.
+        if re.search(r"[.!?…]$", self.current.strip()) and len(words) >= 18:
             return True
         return False
+
+    def _build_operator_draft(self, candidate_words, stable_norm_words):
+        if not candidate_words:
+            return ""
+        stable_len = len(stable_norm_words)
+        draft_words = candidate_words[stable_len:] if stable_len < len(candidate_words) else candidate_words[-12:]
+        return self._clean(" ".join(draft_words[-34:]))
 
     def _sanitize_candidate(self, text):
         text = self._clean(text)
         text = self._remove_word_repeats(text)
         text = self._remove_phrase_repeats(text)
-        text = self._remove_history_echo(text)
+        text = self._strip_history_duplicate_prefix(text)
         return self._clean(text)
 
-    def _remove_history_echo(self, text):
-        if not text:
-            return ""
-        norm = self._norm(text)
-        if not norm:
-            return ""
-        for old in self.recent_committed_blocks_norm[-10:]:
-            if norm == old or self._ratio(norm, old) > 0.92:
-                return ""
+    def _strip_history_duplicate_prefix(self, text):
+        words, norm_words = self._words_and_norm(text)
+        if not words or not self.history_norm_words:
+            return text
+
+        history_tail = self.history_norm_words[-180:]
+        best = 0
+        max_overlap = min(len(history_tail), len(norm_words), 80)
+        for overlap in range(2, max_overlap + 1):
+            if history_tail[-overlap:] == norm_words[:overlap]:
+                best = overlap
+        if best > 0:
+            return " ".join(words[best:])
         return text
 
-    def _looks_like_tail_noise(self, text):
+    def _looks_like_noise(self, text):
         words = text.split()
-        if not words:
-            return True
-
         norm = self._norm(text)
+        if not words or not norm:
+            return True
         if len(words) == 1 and len(norm) <= 3:
             return True
-
-        # Krótkie echo z historii blokujemy, ale nie za agresywnie,
-        # bo końcówki zdań często mają właśnie 2-4 słowa.
-        if len(words) <= 2:
-            committed_text = " ".join(self.committed_norm_words[-180:])
-            if norm and norm in committed_text:
+        if len(words) <= 2 and self.history_norm_words:
+            history_text = " ".join(self.history_norm_words[-160:])
+            if norm in history_text:
                 return True
-
         return False
 
     def _is_duplicate_history(self, text):
         norm = self._norm(text)
         if not norm:
             return True
-        for old in self.recent_committed_blocks_norm[-12:]:
-            if norm == old or self._ratio(norm, old) > 0.92:
+        for old in self.recent_history_norm_blocks[-12:]:
+            if norm == old or self._ratio(norm, old) > 0.90:
                 return True
         return False
 
@@ -416,9 +433,7 @@ class CaptionEngine:
         bad = {
             "napisy stworzone przez społeczność amara org",
             "napisy stworzone przez spolecznosc amara org",
-            "dziękuję za uwagę",
-            "dziekuje za uwage",
-            "koniec",
+            "muzyka",
         }
         if norm in bad:
             return True
@@ -427,18 +442,32 @@ class CaptionEngine:
             return True
         return False
 
-    def _clear_hypotheses(self):
-        self.hypotheses = []
-        self.last_raw_words = []
-        self.last_raw_norm_words = []
+    def _rebuild_history_memory(self):
+        self.history_norm_words = []
+        self.recent_history_norm_blocks = []
+        for block in self.history:
+            norm = self._norm(block)
+            if norm:
+                self.recent_history_norm_blocks.append(norm)
+                self.history_norm_words.extend(norm.split())
+        self.history_norm_words = self.history_norm_words[-1200:]
+        self.recent_history_norm_blocks = self.recent_history_norm_blocks[-32:]
 
-    def _drop_empty_word_pairs(self, words, norm_words):
+    def _clear_candidates(self):
+        self.candidates = []
+        self.last_candidate_words = []
+        self.last_candidate_norm_words = []
+        self.last_candidate_time = 0.0
+
+    def _words_and_norm(self, text):
+        words = self._clean(text).split()
         out_words = []
         out_norm = []
-        for w, n in zip(words, norm_words):
-            if n:
-                out_words.append(w)
-                out_norm.append(n)
+        for word in words:
+            norm = self._norm_word(word)
+            if norm:
+                out_words.append(word)
+                out_norm.append(norm)
         return out_words, out_norm
 
     def _find_sequence(self, haystack, needle):
@@ -465,9 +494,9 @@ class CaptionEngine:
         i = 0
         while i < len(words):
             repeated = False
-            for n in range(10, 1, -1):
-                a = words[i:i+n]
-                b = words[i+n:i+n*2]
+            for n in range(12, 1, -1):
+                a = words[i:i + n]
+                b = words[i + n:i + n * 2]
                 if len(a) == n and len(b) == n and self._norm(" ".join(a)) == self._norm(" ".join(b)):
                     out.extend(a)
                     i += n * 2

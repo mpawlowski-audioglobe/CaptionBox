@@ -5,7 +5,7 @@ cd /d "%~dp0"
 
 echo.
 echo ========================================
-echo CaptionBox AV 1.0 - setup
+echo CaptionBox AV 0.1.1 - setup
 echo ========================================
 echo Folder: %CD%
 echo.

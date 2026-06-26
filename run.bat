@@ -4,7 +4,7 @@ setlocal
 cd /d "%~dp0"
 
 echo ========================================
-echo CaptionBox AV 1.0 - start
+echo CaptionBox AV 0.1.1 - start
 echo ========================================
 echo Folder: %CD%
 echo.
