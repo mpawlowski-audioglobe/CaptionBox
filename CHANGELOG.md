@@ -1,3 +1,13 @@
+# CHANGELOG
+
+## Sprint 2 - Caption Stabilizer 2.1
+
+- Dopisywanie ostatniego roboczego tekstu przy pauzie, żeby nie zjadać końcówek zdań.
+- Mniej konserwatywny ogon stabilizacji: 2 słowa zamiast 4.
+- Lepsze przycinanie overlapu między aktualnym blokiem i nową hipotezą.
+- Dłuższy aktualny blok publiczności przed automatycznym przeniesieniem do historii.
+- Mocniejsze zabezpieczenie przed duplikatami całych bloków.
+
 # Changelog
 
 ## CaptionBox AV 2.0
