@@ -17,6 +17,7 @@ class CaptionWorker(QThread):
     state_changed = Signal(list, str)
     draft_changed = Signal(str)
     status = Signal(str)
+    metrics_changed = Signal(float, str)
     error = Signal(str)
 
     def __init__(
@@ -98,6 +99,7 @@ class CaptionWorker(QThread):
                 self.state_changed.emit(state.history, state.current)
                 self.draft_changed.emit(state.draft)
                 self.status.emit(f"LIVE {state.note} | RMS: {state.rms:.4f}")
+                self.metrics_changed.emit(float(state.rms), str(state.note))
 
         except Exception as exc:
             details = traceback.format_exc()

@@ -1,3 +1,4 @@
+from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import (
     QWidget,
     QLabel,
@@ -6,6 +7,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QComboBox,
     QMessageBox,
+    QProgressBar,
 )
 
 from audience_window import AudienceWindow
@@ -21,19 +23,58 @@ class CaptionBoxWindow(QWidget):
         super().__init__()
         self.worker = None
         self.audio_devices = []
+        self._live_blink_on = True
+        self._last_rms = 0.0
 
         self.audience_window = AudienceWindow(font_px=34)
         self.audience_window.show()
 
         self.setWindowTitle("CaptionBox AV")
-        self.resize(1320, 840)
-        self.setStyleSheet("background-color: #202020; color: white;")
+        self.resize(1320, 860)
+        self.setStyleSheet(
+            """
+            QWidget { background-color: #202020; color: white; }
+            QComboBox { background-color: #111; color: white; border: 1px solid #444; border-radius: 6px; }
+            QLabel { color: white; }
+            QPushButton { background-color: #2b2b2b; color: white; border: 1px solid #444; border-radius: 7px; }
+            QPushButton:disabled { color: #777; background-color: #222; border-color: #333; }
+            """
+        )
 
         self.title = QLabel("CaptionBox AV")
         self.title.setStyleSheet("font-size: 32px; font-weight: 700;")
 
+        self.live_label = QLabel("● STOP")
+        self.live_label.setStyleSheet(
+            "font-size: 20px; font-weight: 800; color: #9a9a9a; padding: 4px 10px;"
+        )
+
         self.status_label = QLabel("Gotowy. Wybierz wejście audio i naciśnij START.")
-        self.status_label.setStyleSheet("font-size: 18px; color: #aaa;")
+        self.status_label.setStyleSheet("font-size: 17px; color: #aaa;")
+
+        self.hardware_label = QLabel("CPU/GPU: gotowe")
+        self.hardware_label.setStyleSheet("font-size: 15px; color: #b7d7ff;")
+
+        self.audio_meter_label = QLabel("Poziom audio")
+        self.audio_meter_label.setStyleSheet("font-size: 14px; color: #aaa;")
+        self.audio_meter = QProgressBar()
+        self.audio_meter.setRange(0, 100)
+        self.audio_meter.setValue(0)
+        self.audio_meter.setTextVisible(False)
+        self.audio_meter.setFixedHeight(12)
+        self.audio_meter.setStyleSheet(
+            """
+            QProgressBar {
+                background-color: #111;
+                border: 1px solid #333;
+                border-radius: 6px;
+            }
+            QProgressBar::chunk {
+                background-color: #44c767;
+                border-radius: 6px;
+            }
+            """
+        )
 
         self.audio_label = QLabel("Źródło audio:")
         self.audio_label.setStyleSheet("font-size: 16px;")
@@ -90,12 +131,10 @@ class CaptionBoxWindow(QWidget):
         )
         self.hint_label.setStyleSheet("font-size: 15px; color: #aaa;")
 
-        self.start_button = QPushButton("START")
-        self.start_button.setStyleSheet("font-size: 24px; padding: 18px;")
+        self.start_button = QPushButton("▶ START")
         self.start_button.clicked.connect(self.start_captioning)
 
-        self.stop_button = QPushButton("STOP")
-        self.stop_button.setStyleSheet("font-size: 24px; padding: 18px;")
+        self.stop_button = QPushButton("■ STOP")
         self.stop_button.clicked.connect(self.stop_captioning)
         self.stop_button.setEnabled(False)
 
@@ -103,10 +142,28 @@ class CaptionBoxWindow(QWidget):
         self.fullscreen_button.setStyleSheet("font-size: 18px; padding: 16px;")
         self.fullscreen_button.clicked.connect(self.toggle_audience_fullscreen)
 
+        self.live_timer = QTimer(self)
+        self.live_timer.setInterval(550)
+        self.live_timer.timeout.connect(self._blink_live_indicator)
+
         self.refresh_audio_devices()
         self._build_layout()
+        self._set_running_ui(False)
 
     def _build_layout(self):
+        top_layout = QHBoxLayout()
+        top_layout.addWidget(self.title)
+        top_layout.addStretch(1)
+        top_layout.addWidget(self.live_label)
+
+        status_layout = QHBoxLayout()
+        status_layout.addWidget(self.status_label, stretch=3)
+        status_layout.addWidget(self.hardware_label, stretch=2)
+
+        meter_layout = QHBoxLayout()
+        meter_layout.addWidget(self.audio_meter_label)
+        meter_layout.addWidget(self.audio_meter, stretch=1)
+
         audio_layout = QHBoxLayout()
         audio_layout.addWidget(self.audio_label)
         audio_layout.addWidget(self.audio_combo, stretch=1)
@@ -126,8 +183,9 @@ class CaptionBoxWindow(QWidget):
         buttons.addWidget(self.fullscreen_button)
 
         layout = QVBoxLayout()
-        layout.addWidget(self.title)
-        layout.addWidget(self.status_label)
+        layout.addLayout(top_layout)
+        layout.addLayout(status_layout)
+        layout.addLayout(meter_layout)
         layout.addLayout(audio_layout)
         layout.addLayout(settings_layout)
         layout.addWidget(self.approved_title)
@@ -177,6 +235,8 @@ class CaptionBoxWindow(QWidget):
         self.audience_window.clear()
         self.draft_view.set_draft("")
         self.status_label.setText("Ładowanie modelu...")
+        self.hardware_label.setText(f"Model: {model_size} | Tryb: {compute_device.upper()}")
+        self.audio_meter.setValue(0)
 
         self.worker = CaptionWorker(
             audio_device_id=selected_audio["id"],
@@ -188,6 +248,7 @@ class CaptionBoxWindow(QWidget):
         self.worker.state_changed.connect(self.update_public_state)
         self.worker.draft_changed.connect(self.draft_view.set_draft)
         self.worker.status.connect(self.status_label.setText)
+        self.worker.metrics_changed.connect(self.update_metrics)
         self.worker.error.connect(self.show_error)
         self.worker.finished.connect(self.worker_finished)
         self.worker.start()
@@ -212,6 +273,64 @@ class CaptionBoxWindow(QWidget):
         self.refresh_button.setEnabled(not running)
         self.compute_combo.setEnabled(not running)
         self.model_combo.setEnabled(not running)
+        self.font_combo.setEnabled(True)
+
+        if running:
+            self.live_timer.start()
+            self.live_label.setText("● LIVE")
+            self.live_label.setStyleSheet(
+                "font-size: 20px; font-weight: 900; color: #ff3b30; padding: 4px 10px;"
+            )
+            self.start_button.setStyleSheet(
+                "font-size: 24px; padding: 18px; background-color: #1f1f1f; color: #777; border: 1px solid #333; border-radius: 8px;"
+            )
+            self.stop_button.setStyleSheet(
+                "font-size: 24px; padding: 18px; background-color: #8b1e1e; color: white; border: 1px solid #ff5a5a; border-radius: 8px; font-weight: 800;"
+            )
+        else:
+            self.live_timer.stop()
+            self.live_label.setText("● STOP")
+            self.live_label.setStyleSheet(
+                "font-size: 20px; font-weight: 800; color: #9a9a9a; padding: 4px 10px;"
+            )
+            self.start_button.setStyleSheet(
+                "font-size: 24px; padding: 18px; background-color: #1f6f3a; color: white; border: 1px solid #34c759; border-radius: 8px; font-weight: 800;"
+            )
+            self.stop_button.setStyleSheet(
+                "font-size: 24px; padding: 18px; background-color: #242424; color: #777; border: 1px solid #333; border-radius: 8px;"
+            )
+            self.status_label.setText("Zatrzymano.")
+            self.audio_meter.setValue(0)
+
+    def _blink_live_indicator(self):
+        if not self.worker:
+            return
+        self._live_blink_on = not self._live_blink_on
+        color = "#ff3b30" if self._live_blink_on else "#6a1b1b"
+        self.live_label.setStyleSheet(
+            f"font-size: 20px; font-weight: 900; color: {color}; padding: 4px 10px;"
+        )
+
+    def update_metrics(self, rms, note):
+        self._last_rms = rms
+        value = max(0, min(100, int(rms * 1800)))
+        self.audio_meter.setValue(value)
+
+        if rms < 0.002:
+            self.audio_meter.setStyleSheet(
+                "QProgressBar { background-color: #111; border: 1px solid #333; border-radius: 6px; }"
+                "QProgressBar::chunk { background-color: #4b5563; border-radius: 6px; }"
+            )
+        elif rms < 0.035:
+            self.audio_meter.setStyleSheet(
+                "QProgressBar { background-color: #111; border: 1px solid #333; border-radius: 6px; }"
+                "QProgressBar::chunk { background-color: #44c767; border-radius: 6px; }"
+            )
+        else:
+            self.audio_meter.setStyleSheet(
+                "QProgressBar { background-color: #111; border: 1px solid #333; border-radius: 6px; }"
+                "QProgressBar::chunk { background-color: #f5a623; border-radius: 6px; }"
+            )
 
     def update_public_state(self, history, current):
         self.public_preview.set_state(history, current)
@@ -219,6 +338,7 @@ class CaptionBoxWindow(QWidget):
 
     def show_error(self, text):
         self.status_label.setText(text)
+        self._set_running_ui(False)
         QMessageBox.critical(self, "CaptionBox AV", text)
 
     def toggle_audience_fullscreen(self):

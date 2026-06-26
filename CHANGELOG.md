@@ -16,3 +16,11 @@
 - Audio input selector.
 - Conference-style audience display.
 - Operator draft preview.
+
+## v0.1.2 - Operator LIVE UI polish
+- Dodano wyraźny status LIVE / STOP w panelu operatora.
+- START jest zielony, gdy program jest zatrzymany.
+- STOP jest czerwony, gdy transkrypcja działa.
+- Dodano migającą kontrolkę LIVE.
+- Dodano prosty pasek poziomu wejścia audio na podstawie RMS.
+- Panel operatora pokazuje aktywny model i tryb CPU/GPU.
